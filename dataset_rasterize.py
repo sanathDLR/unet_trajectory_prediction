@@ -21,17 +21,15 @@ DT_SECONDS = 0.2
 ORIGINAL_DT = 0.05
 FRAME_SKIP = int(DT_SECONDS / ORIGINAL_DT)  # = 4
 
-OUT_DIR = Path("dataset_png/frames")
+OUT_DIR = Path("../../../../../mnt/nfs-share/AI_Datasets/_unzipped/DLR_UT/dataset_png/frames")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 TRAJ_ROOT = Path(
-    "trajectories/DLR-Urban-Traffic-dataset/"
-    "DLR-Urban-Traffic-dataset_v1-2-1/raw_data/trajectories/"
+    "../../../../../mnt/nfs-share/AI_Datasets/_unzipped/DLR_UT/DLR-Urban-Traffic-dataset_v1-3-0/raw_data/trajectories/"
 )
 
 TL_DIR = Path(
-    "trajectories/DLR-Urban-Traffic-dataset/"
-    "DLR-Urban-Traffic-dataset_v1-2-1/raw_data/traffic_lights/"
+    "../../../../../mnt/nfs-share/AI_Datasets/_unzipped/DLR_UT/DLR-Urban-Traffic-dataset_v1-3-0/raw_data/traffic_lights/"
 )
 
 STOP_LINE_JSON = "stop_lines.json"

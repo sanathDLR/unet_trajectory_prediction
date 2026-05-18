@@ -3,6 +3,7 @@ from torch.utils.data import Dataset
 from pathlib import Path
 from PIL import Image
 import numpy as np
+from tqdm import tqdm
 
 
 class SceneEvolutionDataset(Dataset):
@@ -56,7 +57,7 @@ class SceneEvolutionDataset(Dataset):
         valid_dirs = []
         valid_ids = []
 
-        for d, fid in zip(self.frame_dirs, self.frame_ids):
+        for d, fid in tqdm(zip(self.frame_dirs, self.frame_ids), total=len(self.frame_dirs), desc="Loading dataset"):
             if all((d / f).exists() for f in required):
                 valid_dirs.append(d)
                 valid_ids.append(fid)

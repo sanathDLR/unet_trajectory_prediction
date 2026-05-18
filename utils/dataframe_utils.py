@@ -6,6 +6,7 @@ from utils.timestamp_utils import extract_ts_token
 from config import CSV_FILE_PATTERN, BOUNDS_FILE
 from core.frame import Frame
 from typing import Generator
+from tqdm import tqdm
 
 # # -------- lazy frame generator --------------------------------------------
 # def iter_frames(csv_root: Path) -> Generator[Frame, None, None]:
@@ -35,9 +36,13 @@ def iter_frames(csv_root: Path) -> Generator[Frame, None, None]:
     if not csv_paths:
         raise FileNotFoundError(f"No CSVs in {csv_root} matching {CSV_FILE_PATTERN}")
 
-    for csv_path in csv_paths:
+    for csv_path in tqdm(csv_paths, desc="CSV files"):
         df_file = pd.read_csv(csv_path, parse_dates=["timestamp"])
-        for ts, grp in df_file.groupby("timestamp", sort=True):
+
+        # group progress inside each file
+        groups = list(df_file.groupby("timestamp", sort=True))
+
+        for ts, grp in tqdm(groups, desc=f"Frames ({csv_path.name})", leave=False):
             yield Frame.from_df(ts, grp)
 
 def load_dataframe(csv_root: Path) -> pd.DataFrame:

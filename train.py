@@ -6,13 +6,14 @@ import torch.nn.functional as F
 
 from dataset import SceneEvolutionDataset
 from model import ConvLSTM_UNet
+from tqdm import tqdm
 
 # =====================
 # CONFIG
 # =====================
 
-DATA_ROOT = "dataset_png"
-TOPOLOGY  = "dataset_png/topology.png"
+DATA_ROOT = "../../../../../mnt/nfs-share/AI_Datasets/_unzipped/DLR_UT/dataset_png"
+TOPOLOGY  = "../../../../../mnt/nfs-share/AI_Datasets/_unzipped/DLR_UT/topology.png"
 
 BATCH_SIZE = 4
 EPOCHS = 3
@@ -22,6 +23,7 @@ VAL_SPLIT = 0.2
 ROLL_STEPS = 3  # 🔥 autoregressive steps
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Device: ", DEVICE)
 
 torch.backends.cudnn.benchmark = True  # 🔥 speed boost
 
@@ -73,6 +75,21 @@ bce_loss_fn = nn.BCEWithLogitsLoss(
     pos_weight=torch.tensor([15.0]).to(DEVICE)
 )
 
+def balanced_weighted_l1_loss(output, target, threshold=0.05, high_weight=50.0, low_weight=1.0, false_positive_weight=50.0):
+    """
+    Computes a balanced weighted L1 loss to penalize both false negatives (missed color)
+    and false positives (wrongly added color).
+    """
+    # Assign higher weight to target-colored pixels
+    weight = torch.where(target > threshold, high_weight, low_weight)
+
+    # Assign high penalty for pixels that the network colored but should be black
+    false_positive_mask = (target <= threshold) & (output > threshold)
+    weight[false_positive_mask] = false_positive_weight
+
+    loss = (weight * torch.abs(output - target)).mean()
+    return loss
+
 # =====================
 # MODEL
 # =====================
@@ -110,7 +127,9 @@ for epoch in range(EPOCHS):
     model.train()
     train_loss = 0
 
-    for dyn_seq, static, Y, frame_ids in train_loader:
+    train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [TRAIN]", ncols=100)
+
+    for dyn_seq, static, Y, frame_ids in train_pbar:
 
         dyn_seq = dyn_seq.to(DEVICE, non_blocking=True)   # (B,T,2,H,W)
         static  = static.to(DEVICE, non_blocking=True)
@@ -127,10 +146,12 @@ for epoch in range(EPOCHS):
             pred = model(current_dyn, static)  # (B,1,H,W)
 
             # ---- Loss ----
-            bce = bce_loss_fn(pred, Y)
-            dice = dice_loss(pred, Y)
+            #bce = bce_loss_fn(pred, Y)
+            #dice = dice_loss(pred, Y)
+            l1 = balanced_weighted_l1_loss(pred, Y)
 
-            loss += bce + dice
+            #loss += bce + dice
+            loss += l1
 
             # ---- Rebuild input (CRITICAL FIX) ----
             box = pred
@@ -152,14 +173,19 @@ for epoch in range(EPOCHS):
 
         train_loss += loss.item()
 
+        train_pbar.set_postfix(loss=f"{loss.item():.4f}")
+
     train_loss /= len(train_loader)
 
     # -------- VALIDATION --------
     model.eval()
     val_loss = 0
 
+    val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [VAL]", ncols=100)
+
     with torch.no_grad():
-        for dyn_seq, static, Y, frame_ids in val_loader:
+
+        for dyn_seq, static, Y, frame_ids in val_pbar:
 
             dyn_seq = dyn_seq.to(DEVICE, non_blocking=True)
             static  = static.to(DEVICE, non_blocking=True)
@@ -172,10 +198,12 @@ for epoch in range(EPOCHS):
 
                 pred = model(current_dyn, static)
 
-                bce = bce_loss_fn(pred, Y)
-                dice = dice_loss(pred, Y)
+                #bce = bce_loss_fn(pred, Y)
+                #dice = dice_loss(pred, Y)
+                l1 = balanced_weighted_l1_loss(pred, Y)
 
-                loss += bce + dice
+                #loss += bce + dice
+                loss += l1
 
                 # ---- rebuild channels ----
                 box = pred
@@ -190,6 +218,7 @@ for epoch in range(EPOCHS):
                 ], dim=1)
 
             val_loss += loss.item()
+            val_pbar.set_postfix(loss=f"{loss.item():.4f}")
 
     val_loss /= len(val_loader)
 
