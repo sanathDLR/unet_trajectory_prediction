@@ -2,148 +2,318 @@ import torch
 import torch.nn as nn
 
 
-# =================================
-# BASIC BLOCK
-# =================================
-class DoubleConv(nn.Module):
+# ==========================================
+# RESIDUAL BLOCK
+# ==========================================
+
+class ResBlock(nn.Module):
+
     def __init__(self, in_ch, out_ch):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
+
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
+            nn.GroupNorm(8, out_ch),
             nn.ReLU(inplace=True),
 
-            nn.Conv2d(out_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
+            nn.GroupNorm(8, out_ch)
         )
 
+        self.skip = (
+            nn.Identity()
+            if in_ch == out_ch
+            else nn.Conv2d(in_ch, out_ch, 1, bias=False)
+        )
+
+        self.relu = nn.ReLU(inplace=True)
+
     def forward(self, x):
-        return self.net(x)
+        return self.relu(self.conv(x) + self.skip(x))
 
 
-# =================================
+# ==========================================
 # CONVLSTM CELL
-# =================================
-class ConvLSTMCell(nn.Module):
-    def __init__(self, input_dim, hidden_dim, kernel_size=3):
-        super().__init__()
-        padding = kernel_size // 2
+# ==========================================
 
-        self.hidden_dim = hidden_dim
+class ConvLSTMCell(nn.Module):
+
+    def __init__(self, in_ch, hidden_ch):
+        super().__init__()
+
+        self.hidden_ch = hidden_ch
 
         self.conv = nn.Conv2d(
-            input_dim + hidden_dim,
-            4 * hidden_dim,
-            kernel_size,
-            padding=padding
+            in_ch + hidden_ch,
+            4 * hidden_ch,
+            kernel_size=3,
+            padding=1
         )
 
     def forward(self, x, h, c):
-        combined = torch.cat([x, h], dim=1)
-        conv_out = self.conv(combined)
 
-        cc_i, cc_f, cc_o, cc_g = torch.chunk(conv_out, 4, dim=1)
+        gates = self.conv(
+            torch.cat([x, h], dim=1)
+        )
 
-        i = torch.sigmoid(cc_i)
-        f = torch.sigmoid(cc_f)
-        o = torch.sigmoid(cc_o)
-        g = torch.tanh(cc_g)
+        i, f, o, g = torch.chunk(gates, 4, dim=1)
 
-        c_next = f * c + i * g
-        h_next = o * torch.tanh(c_next)
+        i = torch.sigmoid(i)
+        f = torch.sigmoid(f)
+        o = torch.sigmoid(o)
+        g = torch.tanh(g)
 
-        return h_next, c_next
+        c = f * c + i * g
+        h = o * torch.tanh(c)
+
+        return h, c
 
 
-# =================================
-# CONVLSTM ENCODER
-# =================================
+# ==========================================
+# CONVLSTM
+# ==========================================
+
 class ConvLSTM(nn.Module):
-    def __init__(self, input_dim=2, hidden_dim=48):  # 🔥 UPDATED
+
+    def __init__(self, in_ch=1, hidden_ch=64):
         super().__init__()
-        self.cell = ConvLSTMCell(input_dim, hidden_dim)
+
+        self.hidden_ch = hidden_ch
+        self.cell = ConvLSTMCell(in_ch, hidden_ch)
 
     def forward(self, x):
-        # x: (B, T, C, H, W)
+
         B, T, C, H, W = x.shape
 
-        h = torch.zeros(B, self.cell.hidden_dim, H, W, device=x.device)
+        h = torch.zeros(
+            B,
+            self.hidden_ch,
+            H,
+            W,
+            device=x.device
+        )
+
         c = torch.zeros_like(h)
 
         for t in range(T):
             h, c = self.cell(x[:, t], h, c)
 
-        return h  # (B, hidden_dim, H, W)
+        return h
 
 
-# =================================
-# CONVLSTM + UNET (1-step output)
-# =================================
+# ==========================================
+# MODEL
+# ==========================================
+
 class ConvLSTM_UNet(nn.Module):
+
     def __init__(self):
         super().__init__()
 
-        # ---- Temporal encoder ----
-        self.temporal = ConvLSTM(input_dim=2, hidden_dim=48)  # 🔥 FIXED
+        # ---------------------------------
+        # Temporal encoder
+        # ---------------------------------
 
-        # ---- Static encoder ----
-        self.static_enc = DoubleConv(2, 48)
+        self.temporal = ConvLSTM(
+            in_ch=1,
+            hidden_ch=64
+        )
 
-        # ---- UNet encoder ----
-        self.enc1 = DoubleConv(96, 64)
-        self.pool1 = nn.MaxPool2d(2)
+        # ---------------------------------
+        # Static encoder
+        # ---------------------------------
 
-        self.enc2 = DoubleConv(64, 128)
-        self.pool2 = nn.MaxPool2d(2)
+        self.static_enc = ResBlock(
+            2,
+            64
+        )
 
-        # ---- Bottleneck ----
-        self.bottleneck = DoubleConv(128, 256)
+        # ---------------------------------
+        # Fusion
+        # ---------------------------------
 
-        # ---- Decoder ----
-        self.up2 = nn.ConvTranspose2d(256, 128, 2, stride=2)
-        self.dec2 = DoubleConv(256, 128)
+        self.fuse = ResBlock(
+            128,
+            128
+        )
 
-        self.up1 = nn.ConvTranspose2d(128, 64, 2, stride=2)
-        self.dec1 = DoubleConv(128, 64)
+        # ---------------------------------
+        # Encoder
+        # ---------------------------------
 
-        # ---- Output (ONLY 1 STEP) ----
-        self.out_conv = nn.Conv2d(64, 1, 1)
+        self.enc1 = ResBlock(
+            128,
+            64
+        )
+
+        self.enc2 = ResBlock(
+            64,
+            128
+        )
+
+        self.enc3 = ResBlock(
+            128,
+            256
+        )
+
+        self.pool = nn.MaxPool2d(2)
+
+        # ---------------------------------
+        # Bottleneck
+        # ---------------------------------
+
+        self.bottleneck = ResBlock(
+            256,
+            256
+        )
+
+        self.dropout = nn.Dropout2d(0.1)
+
+        # ---------------------------------
+        # Decoder
+        # ---------------------------------
+
+        self.up3 = nn.ConvTranspose2d(
+            256,
+            256,
+            kernel_size=2,
+            stride=2
+        )
+
+        self.dec3 = ResBlock(
+            512,
+            256
+        )
+
+        self.up2 = nn.ConvTranspose2d(
+            256,
+            128,
+            kernel_size=2,
+            stride=2
+        )
+
+        self.dec2 = ResBlock(
+            256,
+            128
+        )
+
+        self.up1 = nn.ConvTranspose2d(
+            128,
+            64,
+            kernel_size=2,
+            stride=2
+        )
+
+        self.dec1 = ResBlock(
+            128,
+            64
+        )
+
+        # ---------------------------------
+        # Final refinement
+        # ---------------------------------
+
+        self.refine = ResBlock(
+            64,
+            64
+        )
+
+        # ---------------------------------
+        # Output
+        # ---------------------------------
+
+        self.head = nn.Conv2d(
+            64,
+            1,
+            kernel_size=1
+        )
 
     def forward(self, dyn_seq, static):
-        """
-        dyn_seq: (B, T, 2, H, W)
-        static:  (B, 2, H, W)
-        """
 
-        # Temporal features
-        temporal_feat = self.temporal(dyn_seq)   # (B, 48, H, W)
+        # -------------------------
+        # Temporal
+        # -------------------------
 
-        # Static features
-        static_feat = self.static_enc(static)    # (B, 48, H, W)
+        temporal_feat = self.temporal(
+            dyn_seq
+        )
 
+        # -------------------------
+        # Static
+        # -------------------------
+
+        static_feat = self.static_enc(
+            static
+        )
+
+        # -------------------------
         # Fusion
-        x = torch.cat([temporal_feat, static_feat], dim=1)  # (B, 96, H, W)
+        # -------------------------
 
+        x = self.fuse(
+            torch.cat(
+                [temporal_feat, static_feat],
+                dim=1
+            )
+        )
+
+        # -------------------------
         # Encoder
+        # -------------------------
+
         e1 = self.enc1(x)
-        p1 = self.pool1(e1)
 
-        e2 = self.enc2(p1)
-        p2 = self.pool2(e2)
+        e2 = self.enc2(
+            self.pool(e1)
+        )
 
+        e3 = self.enc3(
+            self.pool(e2)
+        )
+
+        # -------------------------
         # Bottleneck
-        b = self.bottleneck(p2)
+        # -------------------------
 
+        b = self.bottleneck(
+            self.pool(e3)
+        )
+
+        b = self.dropout(b)
+
+        # -------------------------
         # Decoder
-        d2 = self.up2(b)
-        d2 = torch.cat([d2, e2], dim=1)
-        d2 = self.dec2(d2)
+        # -------------------------
 
-        d1 = self.up1(d2)
-        d1 = torch.cat([d1, e1], dim=1)
-        d1 = self.dec1(d1)
+        d3 = self.dec3(
+            torch.cat(
+                [self.up3(b), e3],
+                dim=1
+            )
+        )
 
-        out = self.out_conv(d1)  # (B,1,H,W)
+        d2 = self.dec2(
+            torch.cat(
+                [self.up2(d3), e2],
+                dim=1
+            )
+        )
 
-        return out
+        d1 = self.dec1(
+            torch.cat(
+                [self.up1(d2), e1],
+                dim=1
+            )
+        )
+
+        # -------------------------
+        # Refinement
+        # -------------------------
+
+        d1 = self.refine(d1)
+
+        # -------------------------
+        # Output
+        # -------------------------
+
+        return self.head(d1)
